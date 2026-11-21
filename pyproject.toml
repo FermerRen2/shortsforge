@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "shortsforge"
+version = "1.0.0"
+description = "Нарезка вертикальных коротких видео из длинных записей стримов"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "FermerRen2" }]
+keywords = ["shorts", "reels", "tiktok", "video", "ffmpeg", "whisper", "capcut", "deepseek"]
+dependencies = [
+    "PySide6-Essentials>=6.6",
+    "faster-whisper>=1.0",
+    "numpy>=1.26",
+    "scipy>=1.11",
+    "opencv-python-headless>=4.8",
+    "Pillow>=10.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/FermerRen2/shortsforge"
+
+[project.scripts]
+shortsforge = "shortsforge.__main__:main"
+
+[tool.setuptools]
+packages = ["shortsforge", "shortsforge.core", "shortsforge.ui"]
+
+[tool.setuptools.package-data]
+shortsforge = ["../assets/*.json"]
