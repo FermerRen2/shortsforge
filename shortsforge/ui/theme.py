@@ -16,13 +16,36 @@ ACCENT2 = "#22d3a8"
 DANGER = "#ff5d73"
 WARN = "#ffc857"
 
-FONT = "Segoe UI"
+FONT = "Inter"
+FALLBACK_FONT = "Segoe UI"
 
 
-def stylesheet() -> str:
+def load_fonts() -> str:
+    """Подключает шрифт Inter из assets/fonts. Возвращает имя семейства, которое реально есть."""
+    from PySide6.QtGui import QFontDatabase
+
+    from ..core import resources
+
+    families = set(QFontDatabase.families())
+    if FONT in families:
+        return FONT
+    fonts_dir = resources.asset("fonts")
+    loaded = False
+    if fonts_dir.exists():
+        for ttf in sorted(fonts_dir.glob("*.ttf")):
+            if QFontDatabase.addApplicationFont(str(ttf)) >= 0:
+                loaded = True
+    families = set(QFontDatabase.families())
+    if loaded and FONT in families:
+        return FONT
+    return FALLBACK_FONT
+
+
+def stylesheet(font: str | None = None) -> str:
+    family = font or FONT
     return f"""
 * {{
-    font-family: "{FONT}", "Inter", sans-serif;
+    font-family: "{family}", "{FALLBACK_FONT}", sans-serif;
     font-size: 14px;
     color: {TEXT};
 }}

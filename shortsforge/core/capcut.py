@@ -17,7 +17,11 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
-TEMPLATE = Path(__file__).resolve().parents[2] / "assets" / "capcut_template.json"
+def template_path() -> Path:
+    """Шаблон черновика: внутри собранного .exe лежит в распакованных данных."""
+    from . import resources
+
+    return resources.asset("capcut_template.json")
 US = 1_000_000  # CapCut хранит время в микросекундах
 
 
@@ -81,10 +85,11 @@ def _text_content(text: str, highlight: str | None, size: float, font_path: str,
 
 def build(spec: ClipSpec, override_dir: str | Path | None = None) -> Path:
     """Собирает черновик и регистрирует его в CapCut. Возвращает папку проекта."""
-    if not TEMPLATE.exists():
+    template = template_path()
+    if not template.exists():
         raise RuntimeError("не найден шаблон проекта CapCut (assets/capcut_template.json)")
     root = Path(override_dir) if override_dir else drafts_root()
-    draft = json.loads(TEMPLATE.read_text(encoding="utf-8"))
+    draft = json.loads(template.read_text(encoding="utf-8"))
 
     dur_us = int(round(spec.duration * US))
     font_path = "C:/Windows/Fonts/arialbd.ttf"

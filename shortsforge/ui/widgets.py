@@ -9,6 +9,7 @@ from PySide6.QtGui import QFont, QPixmap
 from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QSizePolicy, QVBoxLayout,
                                QWidget)
 
+from ..core import resources
 from . import theme
 
 VIDEO_EXT = {".mp4", ".mkv", ".mov", ".avi", ".ts", ".flv", ".webm", ".m4v", ".mpg", ".mpeg"}
@@ -31,16 +32,31 @@ class DropArea(QFrame):
         layout.setAlignment(Qt.AlignCenter)
         layout.setSpacing(6)
 
-        icon = QLabel("🎬")
+        icon = QLabel()
         icon.setAlignment(Qt.AlignCenter)
-        icon.setStyleSheet("font-size: 40px;")
+        icon_file = resources.asset("app-icon.svg")
+        if icon_file.exists():
+            from PySide6.QtSvgWidgets import QSvgWidget
+            svg = QSvgWidget(str(icon_file))
+            svg.setFixedSize(64, 64)
+            icon_row = QHBoxLayout()
+            icon_row.addStretch(1)
+            icon_row.addWidget(svg)
+            icon_row.addStretch(1)
+            self._icon_row = icon_row
+        else:
+            icon.setText("▶")
+            icon.setStyleSheet("font-size: 40px;")
         title = QLabel("Перетащите видео или папку с записью")
         title.setAlignment(Qt.AlignCenter)
         title.setObjectName("H2")
         hint = QLabel("mp4, mkv, mov, ts · можно бросать прямо из проводника")
         hint.setAlignment(Qt.AlignCenter)
         hint.setObjectName("Muted")
-        layout.addWidget(icon)
+        if hasattr(self, "_icon_row"):
+            layout.addLayout(self._icon_row)
+        else:
+            layout.addWidget(icon)
         layout.addWidget(title)
         layout.addWidget(hint)
 

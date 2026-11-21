@@ -8,13 +8,14 @@ import sys
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer, QUrl
-from PySide6.QtGui import QDesktopServices, QFont
+from PySide6.QtCore import QSize
+from PySide6.QtGui import QDesktopServices, QFont, QIcon
 from PySide6.QtWidgets import (QApplication, QFileDialog, QFrame, QHBoxLayout, QLabel,
                                QListWidget, QListWidgetItem, QMessageBox, QPlainTextEdit,
                                QProgressBar, QPushButton, QScrollArea, QSizePolicy,
                                QStackedWidget, QTabWidget, QVBoxLayout, QWidget)
 
-from ..core import capcut, deepseek, media, pipeline
+from ..core import capcut, media, pipeline, resources
 from ..core.config import Settings, get as get_settings
 from . import theme
 from .jobs import TaskRunner
@@ -61,10 +62,10 @@ class MainWindow(QWidget):
         lay.addWidget(tag)
         lay.addSpacing(18)
 
-        self.nav_project = self._nav_button("  ▣   Проект", 0)
-        self.nav_moments = self._nav_button("  ✦   Моменты", 1)
-        self.nav_clips = self._nav_button("  ▶   Ролики", 2)
-        self.nav_log = self._nav_button("  ☰   Журнал", 3)
+        self.nav_project = self._nav_button("Проект", 0, "icon-project")
+        self.nav_moments = self._nav_button("Моменты", 1, "icon-moments")
+        self.nav_clips = self._nav_button("Ролики", 2, "icon-clips")
+        self.nav_log = self._nav_button("Журнал", 3, "icon-log")
         for b in (self.nav_project, self.nav_moments, self.nav_clips, self.nav_log):
             lay.addWidget(b)
         lay.addStretch(1)
@@ -76,18 +77,27 @@ class MainWindow(QWidget):
         env_lay.setSpacing(6)
         self.env_label = QLabel("проверяю окружение…")
         self.env_label.setObjectName("Muted")
+        self.env_label.setTextFormat(Qt.RichText)
         self.env_label.setWordWrap(True)
         env_lay.addWidget(self.env_label)
         lay.addWidget(self.env_box)
 
-        settings_btn = QPushButton("⚙  Настройки")
+        settings_btn = QPushButton("Настройки")
+        gear = resources.icon("icon-settings")
+        if gear.exists():
+            settings_btn.setIcon(QIcon(str(gear)))
+            settings_btn.setIconSize(QSize(17, 17))
         settings_btn.clicked.connect(self._open_settings)
         lay.addWidget(settings_btn)
         return bar
 
-    def _nav_button(self, text: str, index: int) -> QPushButton:
+    def _nav_button(self, text: str, index: int, icon_name: str = "") -> QPushButton:
         btn = QPushButton(text)
         btn.setObjectName("Nav")
+        icon_file = resources.icon(icon_name) if icon_name else None
+        if icon_file and icon_file.exists():
+            btn.setIcon(QIcon(str(icon_file)))
+            btn.setIconSize(QSize(18, 18))
         btn.setCheckable(True)
         btn.setChecked(index == 0)
         btn.clicked.connect(lambda: self._set_page(index))
@@ -114,6 +124,10 @@ class MainWindow(QWidget):
         self.open_btn.clicked.connect(self._pick_file)
         self.folder_btn = QPushButton("Открыть папку")
         self.folder_btn.setObjectName("Ghost")
+        folder_icon = resources.icon("icon-folder")
+        if folder_icon.exists():
+            self.folder_btn.setIcon(QIcon(str(folder_icon)))
+            self.folder_btn.setIconSize(QSize(16, 16))
         self.folder_btn.clicked.connect(self._open_output_dir)
         header.addWidget(self.folder_btn)
         header.addWidget(self.open_btn)
@@ -263,19 +277,26 @@ class MainWindow(QWidget):
 
     # --- окружение -----------------------------------------------------------
     def _refresh_env(self) -> None:
+        """Строки окружения цветными точками: без эмодзи, которые на Windows 10 не рисуются."""
+        def row(ok: bool | None, text: str) -> str:
+            color = theme.ACCENT2 if ok else (theme.WARN if ok is None else theme.DANGER)
+            return f'<span style="color:{color}">●</span> {text}'
+
         lines = []
         try:
             media.ffmpeg()
-            lines.append("✅ ffmpeg найден")
+            lines.append(row(True, "ffmpeg готов"))
         except RuntimeError:
-            lines.append("❌ ffmpeg не найден")
+            lines.append(row(False, "ffmpeg не найден"))
         try:
             import faster_whisper  # noqa: F401
-            lines.append("✅ распознавание готово")
+            lines.append(row(True, "распознавание готово"))
         except ImportError:
-            lines.append("⚠ faster-whisper не установлен")
-        lines.append("✅ ключ DeepSeek задан" if self.cfg.has_key() else "⚠ ключ DeepSeek не задан")
-        lines.append("✅ CapCut найден" if capcut.available() else "⚠ CapCut не найден")
+            lines.append(row(False, "нет faster-whisper"))
+        lines.append(row(True, "ключ DeepSeek задан") if self.cfg.has_key()
+                     else row(None, "ключ DeepSeek не задан"))
+        lines.append(row(True, "CapCut найден") if capcut.available()
+                     else row(None, "CapCut не найден"))
         self.env_label.setText("<br>".join(lines))
 
     # --- страницы -------------------------------------------------------------

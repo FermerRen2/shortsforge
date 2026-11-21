@@ -16,25 +16,24 @@ from pathlib import Path
 
 
 def add_cuda_dlls() -> list[str]:
-    """Подключает DLL из pip-колёс nvidia-*-cu12 (Windows)."""
+    """Подключает DLL CUDA (Windows): рядом с приложением, в папке данных или из pip-колёс.
+
+    Без этого faster-whisper падает с `cublas64_12.dll is not found`, даже когда библиотеки
+    установлены: pip кладёт их в site-packages\nvidia\*, а загрузчик Windows туда не смотрит.
+    """
     if sys.platform != "win32":
         return []
+    from . import resources
+
     added: list[str] = []
-    roots = []
-    for p in list(site.getsitepackages()) + [site.getusersitepackages()]:
-        cand = os.path.join(p, "nvidia")
-        if os.path.isdir(cand):
-            roots.append(cand)
-    for root in roots:
-        for lib in ("cublas", "cudnn", "cuda_nvrtc", "cuda_runtime"):
-            d = os.path.join(root, lib, "bin")
-            if os.path.isdir(d):
-                try:
-                    os.add_dll_directory(d)
-                except OSError:
-                    pass
-                os.environ["PATH"] = d + os.pathsep + os.environ.get("PATH", "")
-                added.append(d)
+    for d in resources.cuda_dirs():
+        path = str(d)
+        try:
+            os.add_dll_directory(path)
+        except OSError:
+            pass
+        os.environ["PATH"] = path + os.pathsep + os.environ.get("PATH", "")
+        added.append(path)
     return added
 
 

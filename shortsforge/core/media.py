@@ -32,23 +32,27 @@ def _which(name: str, extra: list[str]) -> str | None:
 
 
 def ffmpeg() -> str:
-    """Путь к ffmpeg.exe. В PATH часто лежит только ffmpeg.cmd, а subprocess его не запускает."""
-    exe = _which("ffmpeg", [
-        os.path.expandvars(r"%LOCALAPPDATA%\AIEditor\tools\ffmpeg\bin\ffmpeg.exe"),
-        r"C:\ffmpeg\bin\ffmpeg.exe",
-    ])
+    """Путь к ffmpeg.exe: сначала тот, что лежит рядом с приложением, потом PATH.
+
+    В PATH на Windows часто стоит только ffmpeg.cmd, а subprocess такой файл не запускает —
+    поэтому ищем именно .exe.
+    """
+    from . import resources
+
+    exe = resources.binary("ffmpeg")
     if not exe:
-        raise RuntimeError("ffmpeg не найден. Установите ffmpeg и добавьте его в PATH.")
+        raise RuntimeError("ffmpeg не найден. Положите ffmpeg.exe рядом с приложением "
+                           "или добавьте его в PATH.")
     return exe
 
 
 def ffprobe() -> str:
-    exe = _which("ffprobe", [
-        os.path.expandvars(r"%LOCALAPPDATA%\AIEditor\tools\ffmpeg\bin\ffprobe.exe"),
-        r"C:\ffmpeg\bin\ffprobe.exe",
-    ])
+    from . import resources
+
+    exe = resources.binary("ffprobe")
     if not exe:
-        raise RuntimeError("ffprobe не найден. Установите ffmpeg и добавьте его в PATH.")
+        raise RuntimeError("ffprobe не найден. Положите ffprobe.exe рядом с приложением "
+                           "или добавьте его в PATH.")
     return exe
 
 
