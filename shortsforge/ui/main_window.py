@@ -10,13 +10,13 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer, QUrl
 from PySide6.QtCore import QSize
-from PySide6.QtGui import QDesktopServices, QFont, QIcon
+from PySide6.QtGui import QColor, QDesktopServices, QFont, QIcon
 from PySide6.QtWidgets import (QApplication, QFileDialog, QFrame, QHBoxLayout, QLabel,
                                QListWidget, QListWidgetItem, QMessageBox, QPlainTextEdit,
                                QProgressBar, QPushButton, QScrollArea, QSizePolicy,
                                QStackedWidget, QTabWidget, QVBoxLayout, QWidget)
 
-from ..core import capcut, media, pipeline, resources
+from ..core import batch, capcut, media, pipeline, resources
 from ..core.config import Settings, get as get_settings
 from . import theme
 from .jobs import TaskRunner
@@ -67,7 +67,8 @@ class MainWindow(QWidget):
         self.nav_moments = self._nav_button("Моменты", 1, "icon-moments")
         self.nav_clips = self._nav_button("Ролики", 2, "icon-clips")
         self.nav_log = self._nav_button("Журнал", 3, "icon-log")
-        for b in (self.nav_project, self.nav_moments, self.nav_clips, self.nav_log):
+        self.nav_queue = self._nav_button("Очередь", 4, "icon-queue")
+        for b in (self.nav_project, self.nav_moments, self.nav_clips, self.nav_log, self.nav_queue):
             lay.addWidget(b)
         lay.addStretch(1)
 
@@ -137,6 +138,7 @@ class MainWindow(QWidget):
         self.stack = QStackedWidget()
         self.stack.addWidget(self._build_empty())
         self.stack.addWidget(self._build_workspace())
+        self.stack.addWidget(self._build_queue())
         lay.addWidget(self.stack, 1)
 
         # прогресс
@@ -314,9 +316,19 @@ class MainWindow(QWidget):
 
     # --- страницы -------------------------------------------------------------
     def _set_page(self, index: int) -> None:
-        for i, b in enumerate((self.nav_project, self.nav_moments, self.nav_clips, self.nav_log)):
+        for i, b in enumerate((self.nav_project, self.nav_moments, self.nav_clips,
+                               self.nav_log, self.nav_queue)):
             b.setChecked(i == index)
-        if index == 3:
+        if index != 4 and self.prj and self.prj.info:
+            self.h_title.setText(self.prj.source.name if self.prj.source else "Проект")
+            self.h_sub.setText(self.prj.info.as_text())
+        if index == 4:
+            self.stack.setCurrentIndex(2)
+            self.h_title.setText("Очередь записей")
+            self.h_sub.setText("поставьте несколько записей — обработаются по очереди, "
+                              "даже если закрыть окно")
+            self._refresh_queue()
+        elif index == 3:
             self.tabs.setCurrentIndex(2)
         elif index == 2:
             self.tabs.setCurrentIndex(1)
@@ -448,6 +460,10 @@ class MainWindow(QWidget):
         if self.prj.webcam:
             w = self.prj.webcam
             self.badges.addWidget(badge(f"вебка {w['w']}×{w['h']}", "good"))
+        if self.prj.chat_bursts:
+            self.badges.addWidget(badge(f"чат: {len(self.prj.chat_bursts)} всплесков", "good"))
+        elif self.prj.chat_file:
+            self.badges.addWidget(badge("чат без всплесков"))
         if self.prj.candidates:
             self.badges.addWidget(badge(f"моментов: {len(self.prj.candidates)}"))
         if self.prj.clips:
@@ -663,6 +679,136 @@ class MainWindow(QWidget):
             btn.setStyleSheet("text-align:left; padding:8px 12px;")
             btn.clicked.connect(lambda _=False, p=path: self.open_video(p))
             self.recent_layout.addWidget(btn)
+
+
+    def _build_queue(self) -> QWidget:
+        """Страница очереди: поставить пачку записей и запустить на ночь."""
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(12)
+
+        head = QHBoxLayout()
+        titles = QVBoxLayout()
+        titles.setSpacing(2)
+        title = QLabel("Очередь на ночь")
+        title.setObjectName("H1")
+        sub = QLabel("Добавьте записи — приложение обработает их по очереди и соберёт ролики "
+                     "в папку вывода. Можно закрыть окно и вернуться утром.")
+        sub.setObjectName("Muted")
+        sub.setWordWrap(True)
+        titles.addWidget(title)
+        titles.addWidget(sub)
+        head.addLayout(titles, 1)
+
+        self.btn_q_add = QPushButton("Добавить записи")
+        self.btn_q_start = QPushButton("Запустить очередь")
+        self.btn_q_start.setObjectName("Primary")
+        self.btn_q_stop = QPushButton("Остановить")
+        self.btn_q_stop.setObjectName("Ghost")
+        self.btn_q_stop.setEnabled(False)
+        self.btn_q_clear = QPushButton("Убрать готовые")
+        self.btn_q_clear.setObjectName("Ghost")
+        for b in (self.btn_q_add, self.btn_q_start, self.btn_q_stop, self.btn_q_clear):
+            head.addWidget(b)
+        lay.addLayout(head)
+
+        self.btn_q_add.clicked.connect(self._queue_add_files)
+        self.btn_q_start.clicked.connect(self._queue_start)
+        self.btn_q_stop.clicked.connect(self._cancel)
+        self.btn_q_clear.clicked.connect(self._queue_clear)
+
+        self.queue_list = QListWidget()
+        self.queue_list.setSpacing(2)
+        lay.addWidget(self.queue_list, 1)
+
+        self.queue_hint = QLabel("")
+        self.queue_hint.setObjectName("Muted")
+        lay.addWidget(self.queue_hint)
+
+        self.queue = batch.Queue()
+        self._refresh_queue()
+        return page
+
+    def _queue_add_files(self) -> None:
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "Записи в очередь", str(Path.home()),
+            "Видео (*.mp4 *.mkv *.mov *.ts *.flv *.webm *.m4v);;Все файлы (*.*)")
+        if not paths:
+            return
+        added = self.queue.add(paths)
+        self._refresh_queue()
+        self._append_log(f"в очередь добавлено: {added}")
+
+    def _queue_clear(self) -> None:
+        self.queue.clear_finished()
+        self._refresh_queue()
+
+    def _refresh_queue(self) -> None:
+        if not hasattr(self, "queue_list"):
+            return
+        self.queue_list.clear()
+        icons = {batch.STATUS_WAIT: "○", batch.STATUS_WORK: "◐", batch.STATUS_DONE: "●",
+                 batch.STATUS_FAIL: "✕", batch.STATUS_SKIP: "–"}
+        for index, item in enumerate(self.queue.items):
+            mark = icons.get(item.status, "○")
+            extra = []
+            if item.duration_min:
+                extra.append(f"{item.duration_min:.0f} мин")
+            if item.clips and "роликов" not in (item.detail or ""):
+                extra.append(f"роликов {item.clips}")
+            if item.detail:
+                extra.append(item.detail)
+            text = f"{mark}  {item.name}"
+            if extra:
+                text += "   ·   " + " · ".join(extra)
+            row = QListWidgetItem(text)
+            row.setToolTip(item.path)
+            if item.status == batch.STATUS_FAIL:
+                row.setForeground(QColor(theme.DANGER))
+            elif item.status == batch.STATUS_DONE:
+                row.setForeground(QColor(theme.ACCENT2))
+            self.queue_list.addItem(row)
+        pending = len(self.queue.pending())
+        self.queue_hint.setText(
+            f"записей в очереди: {len(self.queue.items)} · ждут запуска: {pending}"
+            if self.queue.items else
+            "Пусто. Добавьте записи — обработаются по очереди, без вашего участия.")
+
+    def _queue_start(self) -> None:
+        if not self.queue.pending():
+            QMessageBox.information(self, "Очередь пуста", "Сначала добавьте записи.")
+            return
+        if self.runner.busy():
+            QMessageBox.information(self, "Занято", "Уже идёт другая операция.")
+            return
+        self._set_busy(True)
+        self.btn_q_start.setEnabled(False)
+        self.btn_q_stop.setEnabled(True)
+        self.status.setText("очередь: запускаю")
+
+        def job(progress, cancel):
+            return batch.run_queue(self.queue, self.cfg, progress, cancel)
+
+        task = self.runner.start(job)
+        task.progress.connect(self._on_progress)
+        task.log.connect(self._append_log)
+        task.failed.connect(self._on_failed)
+        task.done.connect(self._queue_finished)
+
+        self._queue_timer = QTimer(self)
+        self._queue_timer.timeout.connect(self._refresh_queue)
+        self._queue_timer.start(1000)
+        task.finished.connect(lambda: (self._queue_timer.stop(), self._set_busy(False),
+                                       self._refresh_queue()))
+        self._append_log("очередь запущена")
+
+    def _queue_finished(self, report) -> None:
+        self._refresh_queue()
+        text = report.as_text() if hasattr(report, "as_text") else str(report)
+        self._append_log("очередь: " + text)
+        self.status.setText(text[:160])
+        QMessageBox.information(self, "Очередь обработана", text)
 
     # --- прочее ---------------------------------------------------------------
     def _open_path(self, path: str) -> None:

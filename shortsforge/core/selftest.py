@@ -112,8 +112,35 @@ def _checks() -> list[tuple[str, bool, str]]:
         target.unlink(missing_ok=True)
         return str(target.parent)
 
+    def chat_parse() -> str:
+        from . import chat
+
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            f = Path(td) / "c.chat.txt"
+            f.write_text("[00:00:05] ник: привет\n[00:00:06] ник2: хаха", encoding="utf-8")
+            msgs = chat.load_messages(f)
+            if len(msgs) != 2:
+                raise AssertionError("лог чата не разобран")
+            return f"строк {len(msgs)}"
+
+    def cache_key() -> str:
+        from . import cache
+
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            f = Path(td) / "v.mp4"
+            f.write_bytes(b"0" * 64)
+            key = cache.file_key(f)
+            if len(key) < 8:
+                raise AssertionError("ключ кэша не посчитан")
+            return f"ключ {key[:8]}…"
+
     for name, fn in (
         ("ffmpeg", ffmpeg), ("ffprobe", ffprobe),
+        ("чат стрима", chat_parse), ("кэш по файлу", cache_key),
         ("шаблон CapCut", capcut_template), ("черновики CapCut", capcut_drafts),
         ("faster-whisper", whisper), ("CUDA-библиотеки", cuda),
         ("шрифты", fonts), ("иконки", icons),

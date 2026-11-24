@@ -18,7 +18,7 @@ import time as _time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import analysis, capcut, captions as caps, deepseek, layout, media, render
+from . import analysis, cache as filecache, capcut, captions as caps, chat as chatmod, deepseek, layout, media, render
 from .config import Settings
 from .transcribe import Transcriber, Word
 
@@ -40,6 +40,10 @@ class Project:
     clips: list[dict] = field(default_factory=list)
     webcam: dict = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
+    # кэш по файлу и чат стрима (если лог лежит рядом с записью)
+    cache: filecache.FileCache | None = None
+    chat_file: Path | None = None
+    chat_bursts: list = field(default_factory=list)
 
     # --- служебное ---
     @property
@@ -75,6 +79,15 @@ def open_project(source: str | Path, work_dir: str | Path, cfg: Settings) -> Pro
     work.mkdir(parents=True, exist_ok=True)
     prj = Project(source=source, work_dir=work, settings=cfg)
     prj.info = media.probe(source)
+    prj.cache = filecache.FileCache(source)
+    if getattr(cfg, "chat_auto", True):
+        prj.chat_file = chatmod.find_chat_file(source)
+        if prj.chat_file:
+            try:
+                prj.chat_bursts = chatmod.bursts(prj.chat_file)
+                prj.notes.append(f"чат: {chatmod.summary(prj.chat_file)}")
+            except (OSError, ValueError) as e:
+                prj.notes.append(f"чат не прочитался: {e}")
     if prj.state_path.exists():
         try:
             data = json.loads(prj.state_path.read_text(encoding="utf-8"))
@@ -87,6 +100,20 @@ def open_project(source: str | Path, work_dir: str | Path, cfg: Settings) -> Pro
                 prj.parts = media.parts_map(parts)
         except (json.JSONDecodeError, OSError, TypeError):
             prj.notes.append("прежнее состояние не прочиталось, начинаю с чистого листа")
+
+    # кэш переживает удаление рабочей папки: расшифровка и моменты не пропадают
+    if cfg.use_cache and prj.cache:
+        cached_words = prj.cache.get_words("fast") or prj.cache.get_words("full")
+        if cached_words and not prj.words:
+            prj.words = [Word(*w) for w in cached_words]
+            prj.notes.append(f"из кэша: расшифровка ({len(prj.words)} слов)")
+        cached_cands = prj.cache.get("candidates.json")
+        if cached_cands and not prj.candidates:
+            prj.candidates = cached_cands
+            prj.notes.append(f"из кэша: моменты ({len(cached_cands)})")
+        cached_webcam = prj.cache.get("webcam.json")
+        if cached_webcam and not prj.webcam:
+            prj.webcam = cached_webcam
     return prj
 
 
@@ -139,6 +166,10 @@ def transcribe(prj: Project, progress=_noop, cancel=None) -> Project:
         done += part.duration
         progress(min(0.99, done / total), f"распознано {int(done)//60} из {int(total)//60} мин")
     prj.words = sorted(words, key=lambda w: w.start)
+    if cfg.use_cache and prj.cache:
+        prj.cache.put_words(prj.words, "full")
+        if levels_for_cache := None:      # заглушка, чтобы не тянуть лишнее
+            pass
     prj.save()
     progress(1.0, f"расшифровка готова: {len(prj.words)} слов")
     return prj
@@ -147,19 +178,17 @@ def transcribe(prj: Project, progress=_noop, cancel=None) -> Project:
 # --- шаг 3: отбор моментов ---------------------------------------------------
 def fast_select(prj: Project, progress=_noop, cancel=None, windows_wanted: int = 48,
                 window_seconds: float = 26.0) -> Project:
-    progress = progress or _noop
     """Быстрый путь: слушаем громкость по всей записи, расшифровываем только окна.
 
     Зачем: полная расшифровка 2,5-часовой записи — это ~25 минут на видеокарте и больше часа
     на процессоре, а роликов всё равно нужно 10–15. Здесь сначала один проход по звуку
-    (2,5 часа ≈ 35 секунд), из него берутся самые громкие места плюс равномерная сетка
-    (чтобы не пропустить тихие, но смешные куски), и расшифровываются только они —
-    примерно минута аудио на каждый ролик вместо всей записи.
+    (2,5 часа ≈ 35 секунд), из него берутся самые громкие места, места всплесков в чате
+    и равномерная сетка (чтобы не пропустить тихие, но смешные куски), и расшифровываются
+    только они — примерно минута аудио на ролик вместо всей записи.
 
-    Итог: тот же результат в разы быстрее. Минус один: момент, который ничем не выдался
-    по громкости и попал между окнами, можно не увидеть — для полного охвата есть
-    обычная расшифровка.
+    Всё посчитанное кладётся в кэш по файлу: второй запуск на той же записи мгновенный.
     """
+    progress = progress or _noop
     cfg = prj.settings
     prj.refresh_parts()
     parts = prj.parts
@@ -167,22 +196,50 @@ def fast_select(prj: Project, progress=_noop, cancel=None, windows_wanted: int =
     if total <= 0:
         raise RuntimeError("пустая запись")
 
-    # 1) громкость по секундам — один последовательный проход
-    levels: list[float] = []
-    for i, part in enumerate(parts):
-        if cancel and cancel():
-            raise RuntimeError("отменено")
-        base = 0.02 + 0.12 * (i / len(parts))
+    use_cache = bool(cfg.use_cache and prj.cache)
 
-        def sub(_value, msg, base=base):
-            progress(base, msg.replace("громкость", "слушаю запись"))
+    # 0) расшифровка уже есть в кэше — ничего не считаем
+    cached_words = prj.cache.get_words("fast") if use_cache else None
+    if cached_words and prj.chat_bursts is not None:
+        prj.words = [Word(*w) for w in cached_words]
+        prj.windows = [analysis.Window(start=max(0.0, float(w[0]) - 5), end=float(w[1]) + 5,
+                                       loudness=0.0, text="") for w in cached_words]
+        progress(1.0, f"расшифровка взята из кэша: {len(prj.words)} слов")
+        prj.save()
+        return prj
 
-        levels.extend(media.loudness_per_second(part.path, progress=sub, cancel=cancel))
-    progress(0.15, f"прослушал {total/60:.0f} мин записи")
+    # 1) громкость по секундам — один последовательный проход (или из кэша)
+    levels = prj.cache.get_loudness() if use_cache else None
+    if levels:
+        progress(0.15, f"профиль громкости из кэша ({len(levels)//60} мин)")
+    else:
+        levels = []
+        for i, part in enumerate(parts):
+            if cancel and cancel():
+                raise RuntimeError("отменено")
+            base = 0.02 + 0.12 * (i / len(parts))
 
-    # 2) где слушать: громкие места + сетка по всей длине
+            def sub(_value, msg, base=base):
+                progress(base, msg.replace("громкость", "слушаю запись"))
+
+            levels.extend(media.loudness_per_second(part.path, progress=sub, cancel=cancel))
+        if use_cache:
+            prj.cache.put_loudness(levels)
+        progress(0.15, f"прослушал {total/60:.0f} мин записи")
+
+    # 2) где слушать: громкие места + всплески чата + сетка по всей длине
     peaks = analysis.loud_peaks(levels, min_gap=40.0, top=windows_wanted)
     anchors = [at for _loud, at in peaks]
+    chat_used = 0
+    for burst in prj.chat_bursts or []:
+        if isinstance(burst, dict):
+            at, weight = float(burst.get("time", 0)), int(burst.get("messages", 0))
+        else:
+            at, weight = float(burst.time), burst.messages
+        if weight <= 0:
+            continue
+        anchors.append(at)
+        chat_used += 1
     step = total / max(10, windows_wanted // 2)
     anchors += [step * (k + 0.5) for k in range(max(10, windows_wanted // 2))]
     anchors.sort()
@@ -196,7 +253,8 @@ def fast_select(prj: Project, progress=_noop, cancel=None, windows_wanted: int =
     chosen = chosen[:windows_wanted]
     if not chosen:                      # совсем тихая запись — берём сетку целиком
         chosen = [total * (k + 0.5) / 10 for k in range(10)]
-    progress(0.16, f"нашёл {len(chosen)} мест, расшифровываю только их")
+    extra = f", из них по чату: {chat_used}" if chat_used else ""
+    progress(0.16, f"нашёл {len(chosen)} мест{extra}, расшифровываю только их")
 
     # 3) расшифровка окон
     tr = Transcriber(cfg.whisper_model, cfg.whisper_device, cfg.whisper_language)
@@ -230,6 +288,9 @@ def fast_select(prj: Project, progress=_noop, cancel=None, windows_wanted: int =
                                    loudness=0.0, text="") for a in chosen]
     prj.notes.append(f"быстрый режим: {len(chosen)} окон, {len(prj.words)} слов "
                      f"за {(_time.time() - started)/60:.1f} мин")
+    if use_cache:
+        prj.cache.put_words(prj.words, "fast")
+        prj.cache.save_meta(chat=bool(prj.chat_bursts), windows=len(chosen))
     prj.save()
     progress(1.0, f"готово: {len(prj.words)} слов из {len(chosen)} мест")
     return prj
@@ -272,6 +333,8 @@ def suggest(prj: Project, progress=_noop, cancel=None, extra_notes: str = "") ->
                 extra_notes=extra_notes,
             )
             prj.candidates = clips
+            if cfg.use_cache and prj.cache:
+                prj.cache.put("candidates.json", clips)
             prj.notes.append(f"моменты отобраны ИИ: {len(clips)}")
             progress(1.0, f"ИИ предложил {len(clips)} моментов")
             prj.save()
@@ -285,6 +348,8 @@ def suggest(prj: Project, progress=_noop, cancel=None, extra_notes: str = "") ->
         # быстрый режим уже прослушал запись — второй раз не считаем
         progress(0.6, "использую уже найденные места")
         prj.candidates = analysis.heuristic_candidates(prj.words, cfg.ai_clips)
+        if cfg.use_cache and prj.cache:
+            prj.cache.put("candidates.json", prj.candidates)
         prj.notes.append(f"моменты отобраны без ИИ: {len(prj.candidates)}")
         prj.save()
         progress(1.0, f"отобрано {len(prj.candidates)} моментов")
@@ -311,6 +376,8 @@ def webcam_box(prj: Project, force: bool = False) -> dict:
     box = layout.detect(video, prj.work_dir / "cache",
                         duration=prj.info.duration if prj.info else None)
     prj.webcam = box.as_dict()
+    if prj.settings.use_cache and prj.cache:
+        prj.cache.put("webcam.json", prj.webcam)
     prj.save()
     return prj.webcam
 

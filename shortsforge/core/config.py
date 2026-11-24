@@ -97,6 +97,8 @@ class Settings:
     # вывод
     make_preview: bool = True
     make_capcut: bool = True
+    use_cache: bool = True          # кэш по файлу: второй прогон почти мгновенный
+    chat_auto: bool = True          # искать лог чата рядом с записью
     recent_files: list = field(default_factory=list)
     segment_seconds: int = 3600
 
