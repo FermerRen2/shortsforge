@@ -82,6 +82,13 @@ def captions_vs_audio(srt_path: str | Path, words: list, tolerance: float = 0.6)
         shift += 0.25
 
     share = best_score / max(1, len(heard))
+    if share < 0.15:
+        # распознавание иногда выдаёт совсем другой текст (шум, музыка) — это не сдвиг титров
+        return {
+            "name": "титры против звука",
+            "ok": None,
+            "detail": f"не удалось сверить: распознался другой текст (совпало {share:.0%})",
+        }
     ok = abs(best_shift) <= 1.0 and share >= 0.3
     return {
         "name": "титры против звука",

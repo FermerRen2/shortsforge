@@ -104,8 +104,8 @@ class Settings:
 
     # --- хранение ---
     @classmethod
-    def load(cls) -> "Settings":
-        path = app_dir() / "config.json"
+    def load(cls, path: str | Path | None = None) -> "Settings":
+        path = Path(path) if path else app_dir() / "config.json"
         data = {}
         if path.exists():
             try:

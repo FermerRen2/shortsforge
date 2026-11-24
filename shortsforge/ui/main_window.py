@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer, QUrl
@@ -241,17 +242,29 @@ class MainWindow(QWidget):
         steps = QHBoxLayout()
         steps.setSpacing(10)
         self.btn_prepare = QPushButton("1 · Подготовить файл")
-        self.btn_transcribe = QPushButton("2 · Распознать речь")
-        self.btn_suggest = QPushButton("3 · Отобрать моменты")
-        self.btn_build = QPushButton("4 · Сделать ролики")
+        # кнопка 2 делает сразу два дела: быстрый поиск мест + отбор моментов.
+        # Раньше это были два шага, и человек не понимал, чего ждёт и сколько ещё ждать.
+        self.btn_transcribe = QPushButton("2 · Найти моменты")
+        self.btn_transcribe.setObjectName("Primary")
+        self.btn_full = QPushButton("Расшифровать всё")
+        self.btn_full.setObjectName("Ghost")
+        self.btn_full.setToolTip("Медленнее, но ничего не пропустит: расшифровывает запись целиком")
+        self.btn_build = QPushButton("3 · Сделать ролики")
         self.btn_build.setObjectName("Primary")
         self.btn_prepare.clicked.connect(self._do_prepare)
-        self.btn_transcribe.clicked.connect(self._do_transcribe)
-        self.btn_suggest.clicked.connect(self._do_suggest)
+        self.btn_transcribe.clicked.connect(self._do_find_moments)
+        self.btn_full.clicked.connect(self._do_full_transcribe)
         self.btn_build.clicked.connect(self._do_build)
-        for b in (self.btn_prepare, self.btn_transcribe, self.btn_suggest, self.btn_build):
-            steps.addWidget(b, 1)
+        steps.addWidget(self.btn_prepare, 1)
+        steps.addWidget(self.btn_transcribe, 2)
+        steps.addWidget(self.btn_full, 0)
+        steps.addWidget(self.btn_build, 2)
         lay.addLayout(steps)
+
+        self.hint = QLabel("")
+        self.hint.setObjectName("Muted")
+        self.hint.setWordWrap(True)
+        lay.addWidget(self.hint)
 
         self.tabs = QTabWidget()
         self.moments_list = QListWidget()
@@ -347,7 +360,7 @@ class MainWindow(QWidget):
         QMessageBox.critical(self, "Не получилось", message[:1500])
 
     def _set_busy(self, busy: bool) -> None:
-        for b in (self.btn_prepare, self.btn_transcribe, self.btn_suggest, self.btn_build,
+        for b in (self.btn_prepare, self.btn_transcribe, self.btn_full, self.btn_build,
                   self.open_btn):
             b.setEnabled(not busy)
         self.cancel_btn.setEnabled(busy)
@@ -362,7 +375,8 @@ class MainWindow(QWidget):
 
     def _append_log(self, text: str) -> None:
         if text:
-            self.log_view.appendPlainText(text)
+            stamp = time.strftime("%H:%M:%S")
+            self.log_view.appendPlainText(f"{stamp}  {text}")
 
     # --- открытие видео -------------------------------------------------------
     def _pick_file(self) -> None:
@@ -398,12 +412,27 @@ class MainWindow(QWidget):
         self.file_meta.setText(info.as_text())
         self.selected = {}
         self._refresh_badges()
+        self._update_hint()
         self._render_moments(self.prj.candidates or [])
         self._render_clips(self.prj.clips or [])
         self._append_log(f"открыт файл: {path}")
         if self.prj.notes:
             for n in self.prj.notes[-5:]:
                 self._append_log("· " + n)
+
+    def _update_hint(self) -> None:
+        """Понятная подсказка: что нажимать и сколько это займёт."""
+        if not self.prj or not hasattr(self, "hint"):
+            return
+        info = self.prj.info
+        minutes = (info.duration / 60) if info else 0
+        fast = max(1.0, minutes / 18)      # замерено: 2,5 ч записи ≈ 8 минут в быстром режиме
+        full = pipeline.estimate_full_minutes(self.prj)
+        self.hint.setText(
+            f"Запись {minutes:.0f} мин. «Найти моменты» — примерно {fast:.0f} мин "
+            f"(слушает громкость и расшифровывает только громкие места). "
+            f"«Расшифровать всё» — около {full:.0f} мин, зато ничего не пропустит."
+        )
 
     def _refresh_badges(self) -> None:
         while self.badges.count():
@@ -455,13 +484,50 @@ class MainWindow(QWidget):
         self._refresh_badges()
         self._append_log(f"расшифровка: {len(prj.words)} слов")
 
+    def _do_find_moments(self) -> None:
+        """Кнопка 2: быстрый поиск мест + отбор моментов за один заход."""
+        if not self._require_project():
+            return
+        assert self.prj
+        prj = self.prj
+        self._run(lambda progress, cancel: self._find_fast(prj, progress, cancel),
+                  on_done=self._after_suggest, label="ищу моменты")
+
+    @staticmethod
+    def _find_fast(prj, progress, cancel):
+        pipeline.prepare(prj, lambda p, m="": progress(p * 0.05, m), cancel)
+        pipeline.fast_select(prj, lambda p, m="": progress(0.05 + p * 0.85, m), cancel)
+        return pipeline.suggest(prj, lambda p, m="": progress(0.9 + p * 0.1, m), cancel)
+
+    def _do_full_transcribe(self) -> None:
+        """Запасной путь: расшифровать всю запись (медленно, зато ничего не пропустит)."""
+        if not self._require_project():
+            return
+        assert self.prj
+        minutes = pipeline.estimate_full_minutes(self.prj)
+        if QMessageBox.question(
+                self, "Полная расшифровка",
+                f"Это займёт примерно {minutes:.0f} минут и загрузит видеокарту.\n"
+                f"Быстрый поиск делает то же самое за пару минут.\n\nВсё равно расшифровать всё?"
+        ) != QMessageBox.Yes:
+            return
+        prj = self.prj
+        self._run(lambda progress, cancel: self._find_full(prj, progress, cancel),
+                  on_done=self._after_suggest, label="расшифровка всей записи")
+
+    @staticmethod
+    def _find_full(prj, progress, cancel):
+        pipeline.prepare(prj, lambda p, m="": progress(p * 0.03, m), cancel)
+        pipeline.transcribe(prj, lambda p, m="": progress(0.03 + p * 0.87, m), cancel)
+        return pipeline.suggest(prj, lambda p, m="": progress(0.9 + p * 0.1, m), cancel)
+
     def _do_suggest(self) -> None:
         if not self._require_project():
             return
         assert self.prj
         if not self.prj.words:
             QMessageBox.information(self, "Нет расшифровки",
-                                    "Сначала распознайте речь (шаг 2).")
+                                    "Сначала нажмите «Найти моменты» (шаг 2).")
             return
         self._run(lambda progress, cancel: pipeline.suggest(self.prj, progress, cancel),
                   on_done=self._after_suggest, label="отбор моментов")

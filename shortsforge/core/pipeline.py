@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import time as _time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -91,6 +92,7 @@ def open_project(source: str | Path, work_dir: str | Path, cfg: Settings) -> Pro
 
 # --- шаг 1: подготовка файла ------------------------------------------------
 def prepare(prj: Project, progress=_noop, cancel=None) -> Project:
+    progress = progress or _noop
     """Перепаковывает «сырую» запись на куски, если это нужно."""
     assert prj.info is not None
     needed, reason = media.needs_repack(prj.info, prj.source)
@@ -117,6 +119,7 @@ def prepare(prj: Project, progress=_noop, cancel=None) -> Project:
 
 # --- шаг 2: расшифровка ------------------------------------------------------
 def transcribe(prj: Project, progress=_noop, cancel=None) -> Project:
+    progress = progress or _noop
     """Распознаёт речь по всей записи (по кускам, чтобы можно было прервать)."""
     cfg = prj.settings
     prj.refresh_parts()
@@ -142,7 +145,118 @@ def transcribe(prj: Project, progress=_noop, cancel=None) -> Project:
 
 
 # --- шаг 3: отбор моментов ---------------------------------------------------
+def fast_select(prj: Project, progress=_noop, cancel=None, windows_wanted: int = 48,
+                window_seconds: float = 26.0) -> Project:
+    progress = progress or _noop
+    """Быстрый путь: слушаем громкость по всей записи, расшифровываем только окна.
+
+    Зачем: полная расшифровка 2,5-часовой записи — это ~25 минут на видеокарте и больше часа
+    на процессоре, а роликов всё равно нужно 10–15. Здесь сначала один проход по звуку
+    (2,5 часа ≈ 35 секунд), из него берутся самые громкие места плюс равномерная сетка
+    (чтобы не пропустить тихие, но смешные куски), и расшифровываются только они —
+    примерно минута аудио на каждый ролик вместо всей записи.
+
+    Итог: тот же результат в разы быстрее. Минус один: момент, который ничем не выдался
+    по громкости и попал между окнами, можно не увидеть — для полного охвата есть
+    обычная расшифровка.
+    """
+    cfg = prj.settings
+    prj.refresh_parts()
+    parts = prj.parts
+    total = sum(p.duration for p in parts)
+    if total <= 0:
+        raise RuntimeError("пустая запись")
+
+    # 1) громкость по секундам — один последовательный проход
+    levels: list[float] = []
+    for i, part in enumerate(parts):
+        if cancel and cancel():
+            raise RuntimeError("отменено")
+        base = 0.02 + 0.12 * (i / len(parts))
+
+        def sub(_value, msg, base=base):
+            progress(base, msg.replace("громкость", "слушаю запись"))
+
+        levels.extend(media.loudness_per_second(part.path, progress=sub, cancel=cancel))
+    progress(0.15, f"прослушал {total/60:.0f} мин записи")
+
+    # 2) где слушать: громкие места + сетка по всей длине
+    peaks = analysis.loud_peaks(levels, min_gap=40.0, top=windows_wanted)
+    anchors = [at for _loud, at in peaks]
+    step = total / max(10, windows_wanted // 2)
+    anchors += [step * (k + 0.5) for k in range(max(10, windows_wanted // 2))]
+    anchors.sort()
+    chosen: list[float] = []
+    for at in anchors:
+        if not (window_seconds / 2 <= at <= total - window_seconds / 2):
+            continue
+        if any(abs(at - c) < window_seconds for c in chosen):
+            continue
+        chosen.append(at)
+    chosen = chosen[:windows_wanted]
+    if not chosen:                      # совсем тихая запись — берём сетку целиком
+        chosen = [total * (k + 0.5) / 10 for k in range(10)]
+    progress(0.16, f"нашёл {len(chosen)} мест, расшифровываю только их")
+
+    # 3) расшифровка окон
+    tr = Transcriber(cfg.whisper_model, cfg.whisper_device, cfg.whisper_language)
+    tr.load()
+    prj.notes.append(f"распознавание: {tr.status}")
+
+    words: list[Word] = []
+    started = _time.time()
+    audio_done = 0.0
+    for i, at in enumerate(chosen):
+        if cancel and cancel():
+            raise RuntimeError("отменено")
+        abs_start = max(0.0, at - window_seconds / 2)
+        abs_end = min(total, at + window_seconds / 2)
+        part, local = media.locate(parts, abs_start)
+        local_end = min(part.duration, (abs_end - part.start))
+        chunk = _transcribe_slice(tr, part.path, local, local_end, base_abs=part.start + local,
+                                  cancel=cancel)
+        words.extend(chunk)
+        audio_done += abs_end - abs_start
+        spent = _time.time() - started
+        speed = audio_done / spent if spent > 0 else 0
+        left = (len(chosen) - i - 1) * (spent / (i + 1))
+        progress(0.16 + 0.84 * (i + 1) / len(chosen),
+                 f"окно {i + 1} из {len(chosen)} · скорость x{speed:.1f} · "
+                 f"осталось ~{left/60:.1f} мин")
+
+    prj.words = sorted(words, key=lambda w: w.start)
+    prj.windows = [analysis.Window(start=max(0.0, a - window_seconds / 2),
+                                   end=min(total, a + window_seconds / 2),
+                                   loudness=0.0, text="") for a in chosen]
+    prj.notes.append(f"быстрый режим: {len(chosen)} окон, {len(prj.words)} слов "
+                     f"за {(_time.time() - started)/60:.1f} мин")
+    prj.save()
+    progress(1.0, f"готово: {len(prj.words)} слов из {len(chosen)} мест")
+    return prj
+
+
+def _transcribe_slice(tr: Transcriber, video, start: float, end: float, base_abs: float,
+                      cancel=None) -> list[Word]:
+    """Расшифровывает кусок файла и возвращает слова в общем времени записи."""
+    import tempfile
+
+    dur = max(0.4, end - start)
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td) / "s.opus"
+        media.run([media.ffmpeg(), "-hide_banner", "-v", "error", "-y",
+                   "-ss", f"{max(0.0, start):.2f}", "-t", f"{dur:.2f}", "-i", str(video),
+                   "-vn", "-ac", "1", "-ar", "16000", "-c:a", "libopus", str(tmp)])
+        return tr.transcribe(tmp, offset=base_abs, cancel=cancel)
+
+
+def estimate_full_minutes(prj: Project, speed_factor: float = 6.0) -> float:
+    """Сколько примерно займёт полная расшифровка (для подсказки в интерфейсе)."""
+    total = sum(p.duration for p in prj.part_files()) if prj.parts else 0.0
+    return total / max(0.5, speed_factor) / 60
+
+
 def suggest(prj: Project, progress=_noop, cancel=None, extra_notes: str = "") -> Project:
+    progress = progress or _noop
     """Отбор моментов: DeepSeek, если есть ключ, иначе — по эмоциям и громкости."""
     cfg = prj.settings
     if not prj.words:
@@ -167,6 +281,15 @@ def suggest(prj: Project, progress=_noop, cancel=None, extra_notes: str = "") ->
             progress(0.5, "ИИ недоступен, отбираю по эмоциям")
 
     # запасной путь: громкость + эмоции, без сети
+    if prj.windows:
+        # быстрый режим уже прослушал запись — второй раз не считаем
+        progress(0.6, "использую уже найденные места")
+        prj.candidates = analysis.heuristic_candidates(prj.words, cfg.ai_clips)
+        prj.notes.append(f"моменты отобраны без ИИ: {len(prj.candidates)}")
+        prj.save()
+        progress(1.0, f"отобрано {len(prj.candidates)} моментов")
+        return prj
+
     progress(0.35, "считаю громкость по секундам")
     audio_src = prj.part_files()[0] if prj.parts else prj.source
     levels = media.loudness_per_second(audio_src, progress=lambda _p, msg: progress(0.35, msg),
@@ -194,6 +317,7 @@ def webcam_box(prj: Project, force: bool = False) -> dict:
 
 def make_clip(prj: Project, candidate: dict, index: int, progress=_noop,
               cancel=None) -> dict:
+    progress = progress or _noop
     """Собирает один ролик: слои, титры, выкрики, предпросмотр, проект CapCut, проверки."""
     cfg = prj.settings
     prj.refresh_parts()
@@ -283,6 +407,7 @@ def make_clip(prj: Project, candidate: dict, index: int, progress=_noop,
 # --- шаг 5: проверки ---------------------------------------------------------
 def build_all(prj: Project, candidates: list[dict] | None = None, progress=_noop,
               cancel=None) -> list[dict]:
+    progress = progress or _noop
     """Собирает ролики по всем выбранным моментам, отдавая общий прогресс."""
     items = candidates if candidates is not None else prj.candidates
     if not items:
@@ -316,10 +441,16 @@ def verify_clip(prj: Project, clip: dict) -> list[dict]:
 
     if preview and preview.exists():
         try:
-            words = Transcriber(prj.settings.whisper_model, prj.settings.whisper_device,
-                                prj.settings.whisper_language).transcribe(preview)
             from . import verify
+
+            # звук вытягиваем в opus: так распознавание стабильнее, чем прямо из mp4
+            audio = folder / "_check.opus"
+            media.run([media.ffmpeg(), "-hide_banner", "-v", "error", "-y", "-i", str(preview),
+                       "-vn", "-ac", "1", "-ar", "16000", "-c:a", "libopus", str(audio)])
+            words = Transcriber(prj.settings.whisper_model, prj.settings.whisper_device,
+                                prj.settings.whisper_language).transcribe(audio)
             res = verify.captions_vs_audio(folder / "captions.srt", words)
+            audio.unlink(missing_ok=True)
             checks.append(res)
         except Exception as e:                      # noqa: BLE001 - проверка не должна валить сборку
             checks.append({"name": "титры против звука", "ok": None, "detail": f"не проверил: {e}"})

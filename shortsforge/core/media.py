@@ -123,7 +123,12 @@ def probe(path: str | Path) -> MediaInfo:
 
 def needs_repack(info: MediaInfo, path: str | Path) -> tuple[bool, str]:
     """Нужна ли перепаковка: у «сырых» записей нет индекса и перемотка читает файл целиком."""
-    raw = Path(path).read_bytes()[:400_000] if Path(path).stat().st_size > 400_000 else b""
+    # читаем только начало файла: read_bytes() на 8 ГБ читал всю запись и занимал ~80 секунд
+    try:
+        with open(path, "rb") as f:
+            raw = f.read(400_000)
+    except OSError:
+        raw = b""
     init_segments = raw.count(b"ftyp") - 1
     if init_segments >= 2:
         return True, ("Внутри файла несколько служебных заголовков — это склейка кусков стрима.\n"
@@ -267,9 +272,19 @@ def measure_offset(src: str | Path, local_start: float, game_audio: str | Path,
     ref = pcm(src, max(0.0, local_start) - half, span)
     if len(ref) <= len(cur):
         return local_start
-    corr = fftconvolve(ref, cur[::-1], mode="valid")
-    idx = int(np.argmax(np.abs(corr)))
-    peak = float(np.abs(corr).max() / (np.linalg.norm(cur) * np.linalg.norm(ref[:len(cur)]) + 1e-9))
+    corr = np.abs(fftconvolve(ref, cur[::-1], mode="valid"))
+    idx = int(np.argmax(corr))
+    peak = float(corr[idx] / (np.linalg.norm(cur) * np.linalg.norm(ref[:len(cur)]) + 1e-9))
     if peak < 0.25:
         return local_start
-    return round(max(0.0, local_start) - half + idx / SR, 2)
+
+    # Проверка на ложный пик: в игре повторяется музыка, и корреляция может зацепиться
+    # за похожее место. Требуем, чтобы второй по силе пик был заметно слабее, а сама
+    # поправка — небольшой. Иначе считаем, что отрезок стоит там, где просили.
+    mask = np.ones_like(corr, dtype=bool)
+    mask[max(0, idx - int(0.5 * SR)):idx + int(0.5 * SR)] = False
+    second = float(corr[mask].max()) if mask.any() else 0.0
+    shift = idx / SR - half
+    if second > 0.6 * corr[idx] or abs(shift) > 4.0:
+        return local_start
+    return round(max(0.0, local_start) + shift, 2)

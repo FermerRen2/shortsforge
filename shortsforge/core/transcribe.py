@@ -16,7 +16,7 @@ from pathlib import Path
 
 
 def add_cuda_dlls() -> list[str]:
-    """Подключает DLL CUDA (Windows): рядом с приложением, в папке данных или из pip-колёс.
+    r"""Подключает DLL CUDA (Windows): рядом с приложением, в папке данных или из pip-колёс.
 
     Без этого faster-whisper падает с `cublas64_12.dll is not found`, даже когда библиотеки
     установлены: pip кладёт их в site-packages\nvidia\*, а загрузчик Windows туда не смотрит.
@@ -135,3 +135,4 @@ class Transcriber:
                        "-vn", "-ac", "1", "-ar", "16000", "-c:a", "libopus", str(tmp)])
             return self.transcribe(tmp, offset=max(0.0, start - margin),
                                    progress=progress, cancel=cancel)
+

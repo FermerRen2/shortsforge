@@ -121,7 +121,7 @@ def test_settings() -> None:
         cfg.save()
         raw = Path(cfg._path).read_text(encoding="utf-8")
         check("ключ не сохранён открытым текстом", "sk-test-1234567890" not in raw)
-        back = Settings.load()
+        back = Settings.load(cfg._path)
         check("настройки читаются", back.ai_clips == cfg.ai_clips)
     cfg._api_key = ""
 
