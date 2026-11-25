@@ -93,16 +93,28 @@ QFrame#DropArea[drag="true"] {{
     background: #16202a;
 }}
 QLabel#Logo {{
-    font-size: 22px;
+    font-size: 24px;
     font-weight: 800;
     letter-spacing: 1px;
 }}
 QLabel#Tagline {{
     color: {MUTED};
     font-size: 12px;
+    letter-spacing: 0.3px;
+}}
+QLabel#Section {{
+    color: #5c6678;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 1.4px;
+}}
+QLabel#Empty {{
+    color: {MUTED};
+    font-size: 15px;
+    line-height: 1.5;
 }}
 QLabel#H1 {{
-    font-size: 20px;
+    font-size: 21px;
     font-weight: 700;
 }}
 QLabel#H2 {{
@@ -139,9 +151,10 @@ QLabel#BadgeBad {{
 QPushButton {{
     background: {CARD_HI};
     border: 1px solid {BORDER};
-    border-radius: 10px;
-    padding: 9px 16px;
+    border-radius: 11px;
+    padding: 10px 18px;
     font-weight: 600;
+    min-height: 18px;
 }}
 QPushButton:hover {{
     background: #263041;
@@ -160,7 +173,7 @@ QPushButton#Primary {{
                                 stop:0 {ACCENT}, stop:1 #4f7bff);
     border: none;
     color: white;
-    padding: 11px 22px;
+    padding: 12px 24px;
     font-weight: 700;
 }}
 QPushButton#Primary:hover {{
@@ -183,8 +196,9 @@ QPushButton#Ghost:hover {{
 QPushButton#Nav {{
     background: transparent;
     border: none;
+    border-left: 3px solid transparent;
     border-radius: 10px;
-    padding: 10px 14px;
+    padding: 11px 14px;
     text-align: left;
     color: {MUTED};
     font-weight: 600;

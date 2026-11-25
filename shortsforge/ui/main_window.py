@@ -11,10 +11,10 @@ from pathlib import Path
 from PySide6.QtCore import Qt, QTimer, QUrl
 from PySide6.QtCore import QSize
 from PySide6.QtGui import QColor, QDesktopServices, QFont, QIcon
-from PySide6.QtWidgets import (QApplication, QFileDialog, QFrame, QHBoxLayout, QLabel,
-                               QListWidget, QListWidgetItem, QMessageBox, QPlainTextEdit,
-                               QProgressBar, QPushButton, QScrollArea, QSizePolicy,
-                               QStackedWidget, QTabWidget, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QApplication, QButtonGroup, QFileDialog, QFrame, QHBoxLayout,
+                               QLabel, QListWidget, QListWidgetItem, QMessageBox,
+                               QPlainTextEdit, QProgressBar, QPushButton, QScrollArea,
+                               QSizePolicy, QStackedWidget, QTabWidget, QVBoxLayout, QWidget)
 
 from ..core import batch, capcut, media, pipeline, resources
 from ..core.config import Settings, get as get_settings
@@ -24,6 +24,13 @@ from .settings_dialog import SettingsDialog
 from .widgets import DropArea, MomentCard, badge
 
 APP_TITLE = "ShortsForge — нарезка вертикальных роликов"
+
+
+def _nice_name(name: str) -> str:
+    """Имя файла для показа: без эмодзи — на Windows 10 они рисуются пустыми квадратами."""
+    clean = "".join(ch for ch in name if ord(ch) < 0x2190)
+    clean = " ".join(clean.split())
+    return clean or name
 
 
 class MainWindow(QWidget):
@@ -61,14 +68,22 @@ class MainWindow(QWidget):
         tag.setObjectName("Tagline")
         lay.addWidget(logo)
         lay.addWidget(tag)
-        lay.addSpacing(18)
+        lay.addSpacing(20)
 
+        section = QLabel("РАЗДЕЛЫ")
+        section.setObjectName("Section")
+        lay.addWidget(section)
+        lay.addSpacing(2)
+
+        self.nav_group = QButtonGroup(self)
+        self.nav_group.setExclusive(True)
         self.nav_project = self._nav_button("Проект", 0, "icon-project")
         self.nav_moments = self._nav_button("Моменты", 1, "icon-moments")
         self.nav_clips = self._nav_button("Ролики", 2, "icon-clips")
         self.nav_log = self._nav_button("Журнал", 3, "icon-log")
         self.nav_queue = self._nav_button("Очередь", 4, "icon-queue")
         for b in (self.nav_project, self.nav_moments, self.nav_clips, self.nav_log, self.nav_queue):
+            self.nav_group.addButton(b)
             lay.addWidget(b)
         lay.addStretch(1)
 
@@ -121,6 +136,11 @@ class MainWindow(QWidget):
         titles.addWidget(self.h_title)
         titles.addWidget(self.h_sub)
         header.addLayout(titles, 1)
+
+        # значки состояния живут в шапке: раньше они дублировали имя файла отдельной карточкой
+        self.badges = QHBoxLayout()
+        self.badges.setSpacing(8)
+        header.addLayout(self.badges)
 
         self.open_btn = QPushButton("Открыть видео")
         self.open_btn.clicked.connect(self._pick_file)
@@ -222,25 +242,6 @@ class MainWindow(QWidget):
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(12)
 
-        self.info_card = QFrame()
-        self.info_card.setObjectName("Card")
-        i_lay = QHBoxLayout(self.info_card)
-        i_lay.setContentsMargins(16, 12, 16, 12)
-        i_lay.setSpacing(12)
-        info_col = QVBoxLayout()
-        info_col.setSpacing(4)
-        self.file_name = QLabel("—")
-        self.file_name.setObjectName("H2")
-        self.file_meta = QLabel("")
-        self.file_meta.setObjectName("Muted")
-        info_col.addWidget(self.file_name)
-        info_col.addWidget(self.file_meta)
-        i_lay.addLayout(info_col, 1)
-        self.badges = QHBoxLayout()
-        self.badges.setSpacing(8)
-        i_lay.addLayout(self.badges)
-        lay.addWidget(self.info_card)
-
         steps = QHBoxLayout()
         steps.setSpacing(10)
         self.btn_prepare = QPushButton("1 · Подготовить файл")
@@ -316,24 +317,31 @@ class MainWindow(QWidget):
 
     # --- страницы -------------------------------------------------------------
     def _set_page(self, index: int) -> None:
+        """Переключение раздела. Раньше здесь менялись только вкладки, а сама страница
+        оставалась прежней: из очереди было не выйти, и меню выглядело мёртвым."""
         for i, b in enumerate((self.nav_project, self.nav_moments, self.nav_clips,
                                self.nav_log, self.nav_queue)):
             b.setChecked(i == index)
-        if index != 4 and self.prj and self.prj.info:
-            self.h_title.setText(self.prj.source.name if self.prj.source else "Проект")
-            self.h_sub.setText(self.prj.info.as_text())
+
         if index == 4:
             self.stack.setCurrentIndex(2)
             self.h_title.setText("Очередь записей")
-            self.h_sub.setText("поставьте несколько записей — обработаются по очереди, "
-                              "даже если закрыть окно")
+            self.h_sub.setText("")
             self._refresh_queue()
-        elif index == 3:
-            self.tabs.setCurrentIndex(2)
-        elif index == 2:
-            self.tabs.setCurrentIndex(1)
-        elif index == 1:
-            self.tabs.setCurrentIndex(0)
+            return
+
+        has_project = bool(self.prj and self.prj.info)
+        self.stack.setCurrentIndex(1 if has_project else 0)
+        if has_project:
+            full = self.prj.source.name if self.prj.source else "Проект"
+            self.h_title.setText(_nice_name(full))
+            self.h_title.setToolTip(full)
+            self.h_sub.setText(self.prj.info.as_text())
+        else:
+            self.h_title.setText("Новый проект")
+            self.h_sub.setText("перетащите запись стрима, приложение сделает из неё "
+                               "вертикальные ролики")
+        self.tabs.setCurrentIndex({0: 0, 1: 0, 2: 1, 3: 2}.get(index, 0))
 
     # --- работа с задачей -----------------------------------------------------
     def _run(self, func, on_done=None, label: str = "") -> None:
@@ -417,11 +425,7 @@ class MainWindow(QWidget):
             except OSError:
                 pass
         self._refresh_recent()
-        self.stack.setCurrentIndex(1)
-        self.h_title.setText(Path(path).name)
-        self.h_sub.setText(f"рабочая папка: {work}")
-        self.file_name.setText(Path(path).name)
-        self.file_meta.setText(info.as_text())
+        self._set_page(0)
         self.selected = {}
         self._refresh_badges()
         self._update_hint()
@@ -593,8 +597,11 @@ class MainWindow(QWidget):
             self.moments_list.addItem(item)
             self.moments_list.setItemWidget(item, card)
         if not moments:
-            item = QListWidgetItem("Пока пусто: отберите моменты на шаге 3 или загрузите проект.")
+            item = QListWidgetItem("Пока пусто.\n\nНажмите «2 · Найти моменты» — приложение "
+                                   "прослушает запись и предложит куски с крючком.")
             item.setFlags(Qt.NoItemFlags)
+            item.setTextAlignment(Qt.AlignCenter)
+            item.setSizeHint(QSize(0, 120))
             self.moments_list.addItem(item)
 
     def _render_clips(self, clips: list[dict]) -> None:
@@ -629,7 +636,7 @@ class MainWindow(QWidget):
             cover.setPixmap(QPixmap(str(img)).scaled(96, 54, Qt.KeepAspectRatioByExpanding,
                                                      Qt.SmoothTransformation))
         else:
-            cover.setText("🎞")
+            cover.setText("▸")
         row.addWidget(cover)
 
         col = QVBoxLayout()
@@ -673,7 +680,7 @@ class MainWindow(QWidget):
         recent = [p for p in self.cfg.recent_files if Path(p).exists()][:6]
         self.recent_empty.setVisible(not recent)
         for path in recent:
-            btn = QPushButton(f"🎞  {Path(path).name}")
+            btn = QPushButton(f"▸   {Path(path).name}")
             btn.setObjectName("Ghost")
             btn.setToolTip(path)
             btn.setStyleSheet("text-align:left; padding:8px 12px;")
@@ -686,20 +693,21 @@ class MainWindow(QWidget):
         page = QWidget()
         lay = QVBoxLayout(page)
         lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(12)
+        lay.setSpacing(14)
 
-        head = QHBoxLayout()
+        head = QFrame()
+        head.setObjectName("Card")
+        head_lay = QHBoxLayout(head)
+        head_lay.setContentsMargins(18, 16, 18, 16)
+        head_lay.setSpacing(10)
         titles = QVBoxLayout()
-        titles.setSpacing(2)
-        title = QLabel("Очередь на ночь")
-        title.setObjectName("H1")
+        titles.setSpacing(4)
         sub = QLabel("Добавьте записи — приложение обработает их по очереди и соберёт ролики "
                      "в папку вывода. Можно закрыть окно и вернуться утром.")
         sub.setObjectName("Muted")
         sub.setWordWrap(True)
-        titles.addWidget(title)
         titles.addWidget(sub)
-        head.addLayout(titles, 1)
+        head_lay.addLayout(titles, 1)
 
         self.btn_q_add = QPushButton("Добавить записи")
         self.btn_q_start = QPushButton("Запустить очередь")
@@ -710,17 +718,30 @@ class MainWindow(QWidget):
         self.btn_q_clear = QPushButton("Убрать готовые")
         self.btn_q_clear.setObjectName("Ghost")
         for b in (self.btn_q_add, self.btn_q_start, self.btn_q_stop, self.btn_q_clear):
-            head.addWidget(b)
-        lay.addLayout(head)
+            b.setMinimumHeight(38)
+            head_lay.addWidget(b)
+        lay.addWidget(head)
 
         self.btn_q_add.clicked.connect(self._queue_add_files)
         self.btn_q_start.clicked.connect(self._queue_start)
         self.btn_q_stop.clicked.connect(self._cancel)
         self.btn_q_clear.clicked.connect(self._queue_clear)
 
+        body = QFrame()
+        body.setObjectName("Card")
+        body_lay = QVBoxLayout(body)
+        body_lay.setContentsMargins(10, 10, 10, 10)
+        body_lay.setSpacing(8)
         self.queue_list = QListWidget()
-        self.queue_list.setSpacing(2)
-        lay.addWidget(self.queue_list, 1)
+        self.queue_list.setSpacing(3)
+        body_lay.addWidget(self.queue_list, 1)
+        self.queue_empty = QLabel("Очередь пуста.\n\nНажмите «Добавить записи» — можно выбрать "
+                                  "сразу несколько файлов.")
+        self.queue_empty.setObjectName("Empty")
+        self.queue_empty.setAlignment(Qt.AlignCenter)
+        self.queue_empty.setWordWrap(True)
+        body_lay.addWidget(self.queue_empty, 1)
+        lay.addWidget(body, 1)
 
         self.queue_hint = QLabel("")
         self.queue_hint.setObjectName("Muted")
@@ -764,16 +785,20 @@ class MainWindow(QWidget):
                 text += "   ·   " + " · ".join(extra)
             row = QListWidgetItem(text)
             row.setToolTip(item.path)
+            row.setSizeHint(QSize(0, 40))
             if item.status == batch.STATUS_FAIL:
                 row.setForeground(QColor(theme.DANGER))
             elif item.status == batch.STATUS_DONE:
                 row.setForeground(QColor(theme.ACCENT2))
             self.queue_list.addItem(row)
+        empty = not self.queue.items
+        self.queue_list.setVisible(not empty)
+        self.queue_empty.setVisible(empty)
         pending = len(self.queue.pending())
         self.queue_hint.setText(
             f"записей в очереди: {len(self.queue.items)} · ждут запуска: {pending}"
             if self.queue.items else
-            "Пусто. Добавьте записи — обработаются по очереди, без вашего участия.")
+            "Пока пусто — можно добавить сразу несколько записей.")
 
     def _queue_start(self) -> None:
         if not self.queue.pending():

@@ -9,3 +9,9 @@ dist/
 *.log
 config.json
 ShortsForge.exe
+
+build_new/
+dist_new/
+_*.py
+_shot*.png
+_nav*.log

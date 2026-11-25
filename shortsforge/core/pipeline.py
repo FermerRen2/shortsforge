@@ -311,8 +311,15 @@ def _transcribe_slice(tr: Transcriber, video, start: float, end: float, base_abs
 
 
 def estimate_full_minutes(prj: Project, speed_factor: float = 6.0) -> float:
-    """Сколько примерно займёт полная расшифровка (для подсказки в интерфейсе)."""
-    total = sum(p.duration for p in prj.part_files()) if prj.parts else 0.0
+    """Сколько примерно займёт полная расшифровка (для подсказки в интерфейсе).
+
+    Длительность берём у кусков (у них есть .duration), а не у путей к ним:
+    на путях приложение падало при открытии уже подготовленной записи.
+    """
+    if prj.parts:
+        total = sum(p.duration for p in prj.parts)
+    else:
+        total = prj.info.duration if prj.info else 0.0
     return total / max(0.5, speed_factor) / 60
 
 

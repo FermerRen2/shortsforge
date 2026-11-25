@@ -126,9 +126,35 @@ def test_settings() -> None:
     cfg._api_key = ""
 
 
+def test_estimate() -> None:
+    """Регрессия: открытие уже подготовленной записи падало на оценке времени.
+
+    `estimate_full_minutes` брала длительность у путей к кускам, а у Path её нет —
+    приложение вылетало с AttributeError сразу после открытия файла.
+    """
+    print("оценка времени расшифровки")
+    from types import SimpleNamespace
+
+    from shortsforge.core import pipeline
+
+    prj = SimpleNamespace(
+        parts=[SimpleNamespace(duration=600.0), SimpleNamespace(duration=300.0)],
+        info=SimpleNamespace(duration=999.0),
+    )
+    minutes = pipeline.estimate_full_minutes(prj)
+    check("куски суммируются", abs(minutes - (900.0 / 6.0 / 60)) < 0.01, f"получили {minutes}")
+
+    prj_empty = SimpleNamespace(parts=[], info=SimpleNamespace(duration=3600.0))
+    minutes2 = pipeline.estimate_full_minutes(prj_empty)
+    check("без кусков берётся длительность файла", abs(minutes2 - 10.0) < 0.01, f"получили {minutes2}")
+
+    prj_none = SimpleNamespace(parts=[], info=None)
+    check("без данных не падает", pipeline.estimate_full_minutes(prj_none) == 0.0)
+
+
 def main() -> int:
     for test in (test_captions, test_censor, test_drop_popped, test_verify,
-                 test_deepseek_parse, test_analysis, test_settings):
+                 test_deepseek_parse, test_analysis, test_settings, test_estimate):
         test()
     print(f"\nвсе проверки прошли: {passed}")
     return 0
